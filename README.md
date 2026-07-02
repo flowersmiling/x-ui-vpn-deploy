@@ -19,6 +19,21 @@
 | SSL 证书 | acme.sh + Cloudflare DNS 验证 |
 | CDN | Cloudflare（隐藏真实 IP） |
 
+## 开始前准备
+
+在让 Claude Code 执行部署之前，先备齐这些东西，能少走很多回头路：
+
+| # | 需要什么 | 说明 |
+|---|---------|------|
+| 1 | 一台全新 VPS | Debian/Ubuntu，能 SSH 登录（root 或有 sudo 权限的账号均可）。云平台（Azure/AWS/GCP 等）也可以，但要留意它们在系统防火墙之外还有一层独立的安全组/NSG，见下方"已知的坑" |
+| 2 | 已经解析到 Cloudflare 的域名 | 域名（或至少一个子域名）的 NS 记录已指向 Cloudflare。**注意**：如果你的"域名"其实是 `cc.cd`/`co.cc` 这类免费二级域名分发服务，本身可能在 [Public Suffix List](https://publicsuffix.org/list/public_suffix_list.dat) 上，不能直接拿来签证书，需要用你实际申请到的完整子域名，详见 troubleshooting.md |
+| 3 | Cloudflare API 凭据 | Global API Key + 账户注册邮箱，或者一个有 Zone DNS/SSL/Settings 编辑权限的 API Token，二选一，用于自动申请 SSL 证书和配置 DNS |
+| 4 | 一个用于证书注册的邮箱 | 不需要和 Cloudflare 账户邮箱是同一个 |
+| 5 | 已安装 [Claude Code](https://claude.com/claude-code) | 本项目是给它用的 Skill，不是独立脚本 |
+| 6 | （可选）这台 VPS 上是否已有其他服务在跑 | 如果有（比如已经部署了 Outline），提前记下它们用的端口，避免部署过程中被防火墙规则误封 |
+
+准备齐这些信息后，跟 Claude Code 说"帮我部署一个 VPN"，它会按 `SKILL.md` 里的流程逐项向你确认，再开始执行。
+
 ## 这是什么、怎么用
 
 这不是一个可以直接运行的安装脚本，而是一套写给 [Claude Code](https://claude.com/claude-code) 的 **Skill**——把它放进 `~/.claude/skills/x-ui-deploy/` 之后，跟 Claude Code 说"帮我部署一个 VPN"之类的话，它会读取这套文档、通过 SSH 连接你的服务器、逐步完成部署，并在遇到问题时按文档里记录的踩坑经验自主排查。
