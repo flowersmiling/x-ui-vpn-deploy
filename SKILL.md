@@ -159,6 +159,10 @@ description: >
 
 部署成功后，向用户展示以下信息：
 - VLESS 客户端链接（完整一行）
+- **XHTTP path 明文单独列一行，不带前斜杠**（例如 `1f59afd80fa7f7eb`，就是 `/root/.secrets/ws_path.txt` 的原始内容）——链接里它是 URL 编码的 `path=%2F...`，Nginx location 和 Xray 配置里才带 `/`，给用户的总结只给斜杠后的值，不要让用户自己从链接里反解
+- UUID 明文单独列一行（同理，手动配置时要用）
+- **Inbound ID**（`sqlite3 /etc/x-ui/x-ui.db "SELECT id, tag, remark, port FROM inbounds;"` 查出的 id，连同 tag 一起给）——后续用 API 加客户端、写 `cf-dns-strategy.md` 的直连入站、排障时都要按 id 定位入站；注意如果部署中删过重建过入站，id 不一定是 1
+- **面板 basePath**（`x-ui setting -show true` 里的 `webBasePath`，本 skill 步骤 11 会设成 `/`）——决定面板 URL 和 API 前缀是 `http://localhost:54321/` 还是 `http://localhost:54321/<basePath>/`，用户开隧道后访问错路径会 404
 - X-UI 面板的 SSH 隧道命令 + 用户名/密码（新版面板可能还有一个随机生成的 `webBasePath`，访问 URL 要带上）
 - 需要在 Cloudflare 控制台完成的配置（第三步）
 - 如果这台机器是云平台（Azure/AWS/GCP），提醒用户去云平台控制台确认 80/443 在"安全组/NSG"里也放行了——只改 UFW 不够，云平台的网络层防火墙是独立的一层，很容易漏掉导致"服务器自己测什么都正常，外网就是连不上"。

@@ -782,6 +782,8 @@ curl -s -o /dev/null -w "XHTTP via CF: %{http_code}\n" --max-time 20 -X POST "ht
 
 ```bash
 SERVER_IP=$(curl -s --max-time 10 ifconfig.me)
+INBOUND_INFO=$(sqlite3 /etc/x-ui/x-ui.db "SELECT id || ' (tag=' || tag || ', remark=' || remark || ')' FROM inbounds WHERE port=10000;")
+WEBBASEPATH=$(/usr/local/x-ui/x-ui setting -show true 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -Eo 'webBasePath: .+' | awk '{print $2}')
 
 VLESS_LINK="vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&type=xhttp&host=${DOMAIN}&path=%2F${WS_PATH}&fp=chrome#VLESS-XHTTP-TLS-CF"
 
@@ -819,8 +821,10 @@ $VLESS_LINK
 ## X-UI Panel Access (SSH tunnel ONLY)
   SSH Tunnel: ssh -p $SSH_PORT -L $XUI_PORT:localhost:$XUI_PORT user@$SERVER_IP
   URL:        http://localhost:$XUI_PORT/${WEBBASEPATH:-}
+  basePath:   ${WEBBASEPATH:-/}
   Username:   $XUI_USER
   Password:   $XUI_PASS
+  Inbound:    ${INBOUND_INFO:-run: sqlite3 /etc/x-ui/x-ui.db "SELECT id,tag FROM inbounds;"}
 
 ## Adding New Clients
   Do NOT create new inbounds! Add clients to existing inbound:
@@ -855,3 +859,27 @@ cat /root/vpn-config.txt
 ```
 
 将输出中的 VLESS 链接、面板凭据、SSH 隧道命令整理后展示给用户，并按 `SKILL.md` 第三步提醒用户核对 Cloudflare 配置（如果步骤 15 已经自动配好了，这里改成"确认一下"而不是"手动操作"）。
+
+**给用户的总结里必须单独列出以下四个明文值**，不能只藏在 VLESS 链接或面板里，事后再回头问是不必要的往返：
+
+- **XHTTP path，不带前斜杠**（`$WS_PATH` 本身，如 `1f59afd80fa7f7eb`，即 `/root/.secrets/ws_path.txt` 的原始内容）：链接里是 URL 编码的 `path=%2F...`，Nginx location 和 Xray 的 `xhttpSettings.path` 里才是 `/$WS_PATH`；给用户的总结只输出斜杠后的值
+- **UUID**：同理
+- **Inbound ID + tag**：后续用 API 加客户端（`addClient` 要传 `id`）、加直连入站、排障定位都按 id。如果部署中删过重建过入站（比如 3.7.0 上手插行被忽略后改走 API），id 不是 1，必须现查
+- **面板 basePath**：决定隧道后访问 `http://localhost:54321/` 还是 `http://localhost:54321/<basePath>/`，也决定 API 前缀
+
+现查命令（写进步骤 16 之前跑一次，把值填进 vpn-config.txt）：
+
+```bash
+INBOUND_INFO=$(sqlite3 /etc/x-ui/x-ui.db "SELECT id || ' (tag=' || tag || ', remark=' || remark || ')' FROM inbounds WHERE port=10000;")
+WEBBASEPATH=$(/usr/local/x-ui/x-ui setting -show true 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -Eo 'webBasePath: .+' | awk '{print $2}')
+echo "Inbound: $INBOUND_INFO"; echo "basePath: $WEBBASEPATH"
+```
+
+推荐总结格式：
+
+```
+XHTTP path:   1f59afd80fa7f7eb    （不带前斜杠；服务器 /root/.secrets/ws_path.txt）
+UUID:         xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+Inbound ID:   2  (tag=in-10000-tcp, remark=VLESS-XHTTP-TLS-CF)
+basePath:     /                    （面板 URL http://localhost:54321/，API 前缀 /panel/api/）
+```
