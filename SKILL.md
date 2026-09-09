@@ -64,6 +64,7 @@ description: >
 | 9 | CF 凭据 | Key/Token + **CF 账户邮箱**（如选 Key 方式） | — |
 | 10 | 云平台 | 是否 Azure/AWS/GCP 等托管云，还是普通 VPS 商 | Azure / Vultr / 自建机房 |
 | 11 | 已有服务 | 这台机器上有没有已经在跑的其他代理/服务（Outline、其他面板等） | 有 Outline，用了端口 44620/49228 |
+| 12 | 系统发行版 | 不强制问，步骤 1 会 `cat /etc/os-release` 现场核实。Debian/Ubuntu 是主线，AlmaLinux/Rocky/CentOS Stream 走 `manual-deploy.md` 里的 RHEL 分支，**不要让用户重装系统** | AlmaLinux 9 |
 
 > ⚠️ **小坑提醒（域名）**：CF 账户邮箱（注册 CF 时用的）**不一定等于** Q7 的证书邮箱。如选 Global API Key 方式，邮箱填错会报 `Unknown X-Auth-Key or X-Auth-Email`。让用户去 CF 面板右上角头像下确认。
 >
@@ -149,8 +150,10 @@ description: >
 - **每步检查输出**：确认成功再继续下一步。
 - **失败时排障**：读取 `references/troubleshooting.md` 中对应的诊断命令，尝试修复后重试。
 - **不要跳步**：每一步都有依赖关系。
-- **步骤 10（安装 3X-UI）**是交互式的，且不同版本的安装器交互流程可能不同（见步骤 10 的详细说明）：安装器可能会要求输入用户名/密码/端口，也可能在检测到非交互终端时自动生成随机凭据——**不管装的时候给了什么账号密码，都不用管，步骤 11 会通过数据库强制覆盖成我们自己生成的凭据**。
-- **步骤 12/13（写入客户端配置）执行前，必须先查一遍数据库实际 schema**（`sqlite3 x-ui.db ".schema inbounds"` / `.schema clients"`）。3x-ui 不同大版本之间客户端数据的存储方式变过（旧版把 client 列表内嵌在 `inbounds.settings` 的 JSON 字段里；新版把 client 拆到独立的 `clients` + `client_inbounds` 表，`inbounds.settings.clients` 字段在运行时会被忽略）。**不核实 schema 直接抄旧步骤，会出现"数据库里数据看着对、面板也能登录、但 Xray 运行配置里 clients 是 null，所有连接被拒绝"这种不容易发现的坑**——因为服务都显示 active，日志也有连接记录（只是全被 reject），很容易误判为"已经部署成功"。详见步骤 12/13 和 `troubleshooting.md`。
+- **步骤 1 发现不是 Debian/Ubuntu（AlmaLinux/Rocky/CentOS Stream 等 RHEL 系）时，不要让用户重装系统**，按 `manual-deploy.md` 步骤 1 的"RHEL 系差异对照表"替换命令继续：`dnf` 代替 `apt`、`firewalld` 代替 `ufw`、Nginx 站点写 `/etc/nginx/conf.d/`、整体重写 `nginx.conf`（自带的没有 `ssl_protocols`/`server_tokens` 行，`sed` 会静默不生效）、fail2ban 用 `firewallcmd-rich-rules` + `backend = systemd`、证书放 `/etc/nginx/cert/`。3x-ui 安装脚本本身支持 RHEL 系。实战（AlmaLinux 9.7）按这套替换一次跑通。
+- **步骤 10（安装 3X-UI）**：3.7+ 的安装器有正式的非交互模式——`NONINTERACTIVE=1` 加 `XUI_USERNAME`/`XUI_PASSWORD`/`XUI_PANEL_PORT`/`XUI_WEB_BASE_PATH`/`XUI_SSL_MODE=none` 环境变量，直接把我们生成的凭据喂进去，不再有喂 stdin 被忽略的问题（见步骤 10）。老版本才是交互式的，交互流程各版本不同，**不管装的时候给了什么账号密码都不用管，步骤 11 会强制覆盖成我们自己生成的凭据**。
+- **步骤 11（面板配置）**：3.7+ 用 `x-ui setting -username ... -password ... -port ... -webBasePath / -listenIP 127.0.0.1` 一条命令搞定，不再需要 bcrypt + sqlite 改 users 表。只有订阅开关和 secret 还要走 sqlite。
+- **步骤 12/13（写入客户端配置）执行前，必须先查一遍数据库实际 schema**（`sqlite3 x-ui.db ".schema inbounds"` / `.schema clients"`）。3x-ui 不同大版本之间客户端数据的存储方式变过（旧版把 client 列表内嵌在 `inbounds.settings` 的 JSON 字段里；新版把 client 拆到独立的 `clients` + `client_inbounds` 表，`inbounds.settings.clients` 字段在运行时会被忽略）。**不核实 schema 直接抄旧步骤，会出现"数据库里数据看着对、面板也能登录、但 Xray 运行配置里 clients 是 null，所有连接被拒绝"这种不容易发现的坑**——因为服务都显示 active，日志也有连接记录（只是全被 reject），很容易误判为"已经部署成功"。**新版 schema 首选走面板 API**（`/panel/api/inbounds/add` + `Authorization: Bearer <x-ui setting -getApiToken>`），让面板自己处理三张表；3.7.0 上直接 INSERT `inbounds` 行会被 config 生成逻辑整个忽略（`config.json` 里 inbounds 为空、10000 不监听、日志无报错）。client JSON 里不要带 `"tgId":""`（3.7 改成 int），登录接口对 curl 返回 403（CSRF），API 创建的 tag 是 `in-10000-tcp`。API 成功后必须 `systemctl restart x-ui`。详见步骤 13 路线 A 和 `troubleshooting.md`。
 
 #### 部署完成后输出
 
@@ -239,9 +242,11 @@ TUN 模式默认需要管理员权限手动启动，嫌麻烦可以用 Windows �
 4. **添加用户用「添加客户端」**——不要新建入站
 5. **改完面板配置要重启 x-ui**——config.json 可能不同步
 6. **客户端链接复制最容易断行**——排障第一件事检查链接完整性
-7. **写客户端数据前先核实数据库 schema**——3x-ui 新版把 client 挪到独立表，旧步骤照抄会导致"看着部署成功、实际所有连接被拒绝"，这是最容易被忽视、排查成本最高的一类坑
+7. **写客户端数据前先核实数据库 schema，新版优先走面板 API 而不是手写 sqlite**——3x-ui 新版把 client 挪到独立表，旧步骤照抄会导致"看着部署成功、实际所有连接被拒绝"；3.7.0 上更彻底，手插的 inbound 行会被整个忽略。用 `x-ui setting -getApiToken` 的 Bearer token 调 `/panel/api/inbounds/add`，加完 `systemctl restart x-ui`，再看 `config.json` 里 inbound 真的存在
 8. **根域名可能是公共后缀（PSL）**——申请证书前用 publicsuffix.org 的列表核实一遍，避免对着一个自己不完全拥有的域名申请证书
 9. **云平台的网络层防火墙独立于 UFW**——Azure/AWS/GCP 等都有单独的安全组/NSG，只改 UFW 不够
 10. **VPS 内存别留 0 swap**——小内存实例在内存压力下容易整机失联（SSH、云平台管理通道都进不去），加 1-2GB swap 作为兜底
 11. **客户端默认用 TUN 模式，而不是系统代理模式**——避免 QUIC/DNS 绕过代理导致的"部分网站打不开"
 12. **部署前问清楚这台机器上是否已有其他服务**——UFW 默认拒绝策略会把已有服务的端口一并封死
+13. **系统是 RHEL 系（AlmaLinux/Rocky/CentOS）不用重装**——按 `manual-deploy.md` 的差异对照表换命令即可：dnf / firewalld / conf.d / 重写 nginx.conf / fail2ban systemd 后端 / 证书放 /etc/nginx/cert，其余步骤完全一致
+14. **非交互 SSH（plink -batch / ssh "bash -s"）逐步喂脚本时，变量写进 `/root/.secrets/deploy-vars.sh` 每步 source**——否则步骤 0 的变量在下一次连接里全没了

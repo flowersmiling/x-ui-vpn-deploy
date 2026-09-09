@@ -25,7 +25,7 @@
 
 | # | 需要什么 | 说明 |
 |---|---------|------|
-| 1 | 一台全新 VPS | Debian/Ubuntu，能 SSH 登录（root 或有 sudo 权限的账号均可）。云平台（Azure/AWS/GCP 等）也可以，但要留意它们在系统防火墙之外还有一层独立的安全组/NSG，见下方"已知的坑" |
+| 1 | 一台全新 VPS | Debian/Ubuntu 为主线；AlmaLinux/Rocky/CentOS Stream 等 RHEL 系也支持（dnf/firewalld/conf.d 的差异已写进 `manual-deploy.md`，不用重装）。能 SSH 登录（root 或有 sudo 权限的账号均可）。云平台（Azure/AWS/GCP 等）也可以，但要留意它们在系统防火墙之外还有一层独立的安全组/NSG，见下方"已知的坑" |
 | 2 | 已经解析到 Cloudflare 的域名 | 域名（或至少一个子域名）的 NS 记录已指向 Cloudflare。**注意**：如果你的"域名"其实是 `cc.cd`/`co.cc` 这类免费二级域名分发服务，本身可能在 [Public Suffix List](https://publicsuffix.org/list/public_suffix_list.dat) 上，不能直接拿来签证书，需要用你实际申请到的完整子域名，详见 troubleshooting.md |
 | 3 | Cloudflare API 凭据 | Global API Key + 账户注册邮箱，或者一个有 Zone DNS/SSL/Settings 编辑权限的 API Token，二选一，用于自动申请 SSL 证书和配置 DNS |
 | 4 | 一个用于证书注册的邮箱 | 不需要和 Cloudflare 账户邮箱是同一个 |
@@ -74,6 +74,8 @@ references/
 3. **云平台的网络层防火墙独立于系统防火墙**——Azure/AWS/GCP 都有单独的安全组/NSG，只改 UFW 不够
 4. **客户端"系统代理"模式漏掉 UDP/DNS**——导致 Google/YouTube 等站点或某些 SSO 登录页打不开，很容易被误判成服务器或线路问题
 5. **小内存 VPS 没有 swap，资源压力下整机失联**——连 SSH 和云平台管理通道都进不去，只能靠串行控制台或重启恢复
+6. **3x-ui 3.7.0 起手写 sqlite 插入的入站会被整个忽略**——`config.json` 里 inbounds 为空、端口不监听、日志无报错。新版走面板 API（Bearer token）创建入站，登录接口对 curl 是 403，`tgId` 字段改成了整数
+7. **VPS 是 AlmaLinux/Rocky 这类 RHEL 系**——没有 ufw、没有 sites-available、自带 nginx.conf 结构不同、fail2ban 日志在 journald，按对照表换命令即可，不用重装成 Debian
 
 ## License
 

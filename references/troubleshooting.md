@@ -47,9 +47,13 @@
 | SSL 错误 | `openssl x509 -in /root/cert/fullchain.cer -noout -enddate` | 续期证书 |
 | XHTTP 不通 | curl 测试连通性（见下方） | 检查 Nginx location 配置 |
 | Nginx 配置错误 | `nginx -t` | 根据错误信息修复 |
-| 防火墙问题 | `ufw status` | 确认 443 端口开放，以及云平台安全组/NSG |
+| 防火墙问题 | `ufw status`（Debian）/ `firewall-cmd --list-all`（RHEL） | 确认 443 端口开放，以及云平台安全组/NSG |
 | 面板配置不同步 | 对比数据库和 config.json | `systemctl restart x-ui` |
 | 证书申请报 DNS identifier invalid | 域名是否为公共后缀（PSL） | 见下方"根域名是公共后缀" |
+| **inbound 在数据库里，但 config.json 的 inbounds 是空的、10000 不监听、日志无报错（3.7.0 实战踩过）** | `SELECT id,tag,port FROM inbounds;` 有行，`config.json` 里没有 | 手插的行被新版整个忽略，删掉后改走面板 API 重建，见下方 clients 章节的"路线 A" |
+| 面板 `/login` 对 curl 返回 403 空响应 | 3.7 登录接口有 CSRF 保护 | 别拿 cookie，用 `x-ui setting -getApiToken` 的 Bearer token 调 `/panel/api/*` |
+| API 报 `cannot unmarshal string into ... tgId of type int64` | client JSON 里带了 `"tgId":""` | 去掉 tgId 字段（3.7 改成 int） |
+| `ufw: command not found` / `apt: command not found` | `cat /etc/os-release` 是 AlmaLinux/Rocky/CentOS | 走 RHEL 分支，见下方"RHEL 系服务器" |
 
 ### 详细诊断命令
 
@@ -118,12 +122,31 @@ for ib in cfg.get('inbounds', []):
 tail -50 /var/log/x-ui/xray-access.log
 ```
 
-**修复**：
+**3.7.0 上的变体（2026-09 实战）**：症状更彻底——不是 `clients` 为 null，而是 `config.json` 的 `inbounds` 直接是空数组，`ss -tlnp` 看不到 10000，`journalctl -u x-ui` 只有 "Xray started"，没有任何 warning。数据库里 `SELECT * FROM inbounds` 明明有那一行、`enable=1`、字段全对。原因是新版的 config 生成逻辑只认它自己（面板/API）建的入站，手插行整个被跳过。
+
+**修复路线 A（新版首选）：删掉手插的行，走面板 API 重建**：
+
+```bash
+systemctl stop x-ui
+sqlite3 /etc/x-ui/x-ui.db "DELETE FROM inbounds WHERE port=10000;"
+systemctl start x-ui && sleep 3
+
+TOKEN=$(/usr/local/x-ui/x-ui setting -getApiToken 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -Eo 'apiToken: .+' | awk '{print $2}')
+XUI_PORT=$(sqlite3 /etc/x-ui/x-ui.db "SELECT value FROM settings WHERE key='webPort' LIMIT 1;")
+curl -s "http://127.0.0.1:$XUI_PORT/panel/api/inbounds/list" -H "Authorization: Bearer $TOKEN"   # 先确认 token 能用
+# 然后按 manual-deploy.md 步骤 13 路线 A 的 JSON 调 /panel/api/inbounds/add（client 里不要带 tgId）
+systemctl restart x-ui && sleep 3
+ss -tlnp | grep 10000
+```
+
+> 别试图用 `curl -X POST /login` 拿 cookie——3.7 的登录接口有 CSRF 保护，非浏览器请求即使带 `Origin`/`Referer` 也是 403。Bearer token 走 `/panel/api/*` 没有这个限制。API 建出来的 tag 是 `in-10000-tcp`，后续查询用 `WHERE port=10000` 而不是 tag。
+
+**修复路线 B（API 用不了时手写两张表）**：
 
 ```bash
 sqlite3 /etc/x-ui/x-ui.db ".schema clients"  # 确认这张表存在，说明是新版 schema
 
-INBOUND_ID=$(sqlite3 /etc/x-ui/x-ui.db "SELECT id FROM inbounds WHERE tag='inbound-10000';")
+INBOUND_ID=$(sqlite3 /etc/x-ui/x-ui.db "SELECT id FROM inbounds WHERE port=10000;")
 UUID=$(cat /root/.secrets/vless_uuid.txt)
 NOW=$(date +%s%3N)
 
@@ -136,7 +159,29 @@ sleep 3
 # 重新确认 clients 不再是 null
 ```
 
-**预防**：任何时候照抄本文档或旧的部署记录之前，先跑一遍 `.schema inbounds` / `.schema clients` 核实当前版本的实际表结构，不要假设面板版本和文档写的时候一样。
+**预防**：任何时候照抄本文档或旧的部署记录之前，先跑一遍 `.schema inbounds` / `.schema clients` 核实当前版本的实际表结构，不要假设面板版本和文档写的时候一样。新版能走 API 就走 API，让面板自己对表结构负责。
+
+### 2.5 RHEL 系服务器（AlmaLinux/Rocky/CentOS Stream）：命令找不到、fail2ban 起不来、Nginx 加固没生效
+
+**症状**：`ufw: command not found`、`apt: command not found`；fail2ban `systemctl status` 报 `Have not found any log file for sshd jail`；步骤 6 的两条 `sed` 跑完 `nginx.conf` 一点没变；Nginx 反代 10000 报 `(13: Permission denied)`。
+
+**原因**：这台机器不是 Debian/Ubuntu。RHEL 系没有 ufw、没有 `/var/log/auth.log`（sshd 日志在 journald）、自带 `nginx.conf` 没有 `ssl_protocols`/`server_tokens` 行、可能开着 SELinux。
+
+**修复**：不用重装，按 `manual-deploy.md` 步骤 1 的"RHEL 系差异对照表"逐项替换：
+
+```bash
+. /etc/os-release; echo "$ID $VERSION_ID"; getenforce 2>/dev/null
+# 防火墙
+firewall-cmd --list-all
+# fail2ban：jail.local 里 banaction = firewallcmd-rich-rules，backend = systemd，删掉 logpath 行
+fail2ban-client status sshd
+# Nginx：站点在 /etc/nginx/conf.d/<域名>.conf，nginx.conf 要整体重写（步骤 6 有模板）
+nginx -T 2>/dev/null | grep -E 'ssl_protocols|server_tokens'
+# SELinux Enforcing 时 nginx 才能 proxy_pass 到本机端口
+[ "$(getenforce 2>/dev/null)" = "Enforcing" ] && setsebool -P httpd_can_network_connect 1
+```
+
+实战（AlmaLinux 9.7，SELinux Disabled）按这套替换一次跑通，3x-ui 安装脚本本身就支持 `almalinux | rocky | rhel`。
 
 ### 3. 根域名是 Public Suffix List 上的公共后缀 → 证书申请失败
 
@@ -292,11 +337,17 @@ systemctl start x-ui
 
 **症状**：`ss -tlnp` 发现公网上多了一个意外端口（如 2096）。
 
-**修复**：
+**修复**（用先查再写的方式，避开下面说的 `INSERT OR REPLACE` 重复行问题）：
 ```bash
-sqlite3 /etc/x-ui/x-ui.db "INSERT OR REPLACE INTO settings (key, value) VALUES ('subEnable', 'false');"
-sqlite3 /etc/x-ui/x-ui.db "INSERT OR REPLACE INTO settings (key, value) VALUES ('subListen', '127.0.0.1');"
+set_setting() {
+  local n=$(sqlite3 /etc/x-ui/x-ui.db "SELECT COUNT(*) FROM settings WHERE key='$1';")
+  if [ "$n" = "0" ]; then sqlite3 /etc/x-ui/x-ui.db "INSERT INTO settings (key, value) VALUES ('$1', '$2');"
+  else sqlite3 /etc/x-ui/x-ui.db "UPDATE settings SET value='$2' WHERE key='$1';"; fi
+}
+set_setting subEnable false
+set_setting subListen 127.0.0.1
 systemctl restart x-ui
+ss -tlnp | grep 2096   # 应该没有输出
 ```
 
 ### 面板导出的 VLESS 链接不能直接用

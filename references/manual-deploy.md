@@ -21,11 +21,14 @@ CF_Email="your_cf_email"
 # CF_Token="your_api_token"
 
 # === 自动拼接 ===
-DOMAIN="${SUBDOMAIN_PREFIX}.${ROOT_DOMAIN}"
+DOMAIN="${SUBDOMAIN_PREFIX}.${ROOT_DOMAIN}"   # SUBDOMAIN_PREFIX 为空时直接 DOMAIN="$ROOT_DOMAIN"
 XUI_PORT="54321"
+CERT_DIR="/root/cert"                         # RHEL 系改成 /etc/nginx/cert（见步骤 1 对照表）
 ```
 
 后续所有命令直接使用这些变量，无需额外替换。
+
+> **变量持久化（非交互 SSH 环境必做）**：如果不是在一个长期保持的交互式 SSH 会话里操作，而是每步单独 `ssh host "bash -s" < script.sh` / `plink -batch ... "bash -s" < script.sh` 这样喂脚本，shell 变量在两次调用之间不会保留。把上面这段变量定义整体写进 `/root/.secrets/deploy-vars.sh`（`chmod 600`），后续每个脚本开头 `source /root/.secrets/deploy-vars.sh` 再执行，就等价于"同一个会话"。实战中 Windows 本机用 PuTTY 的 `plink -batch -ssh -P 22 -pw '密码' root@IP "bash -s" < step.sh` 这种方式逐步骤喂脚本，配合这个变量文件跑通了全流程。
 
 > **域名核实（先做这步再定变量，实战踩过坑）**：如果 `ROOT_DOMAIN` 疑似免费二级域名分发服务（形如 `cc.cd`、`co.cc` 这类），先核实它本身是否在 Public Suffix List 里：
 > ```bash
@@ -43,11 +46,36 @@ XUI_PORT="54321"
 
 ```bash
 whoami  # 可能不是 root（Azure/AWS 等云镜像常见非 root 账号），后续命令按需加 sudo
-cat /etc/os-release | head -3  # 必须是 Debian/Ubuntu
+cat /etc/os-release | head -3  # Debian/Ubuntu 为主线；AlmaLinux/Rocky/CentOS Stream 走下方"RHEL 系差异对照表"
+getenforce 2>/dev/null || echo "no SELinux"  # RHEL 系才有；Enforcing 时步骤 4/7 要额外处理
 ss -tlnp | grep -E ':80 |:443 '  # 检查端口占用
 ```
 
 如果 80/443 已被占用，提醒用户现有服务可能被覆盖，确认后再继续。
+
+> **发行版不是 Debian/Ubuntu 怎么办（实战踩过，AlmaLinux 9.7）**：不要让用户重装系统，本 skill 的架构（Nginx + acme.sh + 3x-ui）在 RHEL 系上完全能跑，只是包管理、防火墙、Nginx 目录布局、fail2ban 后端几处不同。3x-ui 官方安装脚本本身就支持 `almalinux | rocky | rhel | fedora`。检测方法：
+> ```bash
+> . /etc/os-release; echo "$ID $VERSION_ID"   # almalinux / rocky / centos / rhel → 走 RHEL 分支
+> ```
+>
+> **RHEL 系差异对照表**（每个受影响的步骤里都有对应的"RHEL 系"小节，这里是总览）：
+>
+> | 项目 | Debian/Ubuntu（主线） | RHEL 系（AlmaLinux/Rocky/CentOS Stream 9） |
+> |------|----------------------|---------------------------------------------|
+> | 包管理 | `apt install` | `dnf install`，先装 `epel-release`（nginx/fail2ban 在 EPEL 或 AppStream） |
+> | sqlite 命令行 | 包名 `sqlite3` | 包名 `sqlite`（命令仍是 `sqlite3`） |
+> | cron | 包名 `cron` | 包名 `cronie`，服务名 `crond`，acme.sh 装定时任务前必须已启用 |
+> | bcrypt | `python3-bcrypt` | 没有系统包，`pip3 install bcrypt`（RHEL 9 的 pip 没有 externally-managed 限制） |
+> | 防火墙 | `ufw` | `firewalld`（`firewall-cmd`），没有 ufw 包 |
+> | fail2ban 封禁后端 | `banaction = ufw`，`logpath = /var/log/auth.log` | `banaction = firewallcmd-rich-rules`，`backend = systemd`（没有 auth.log，日志在 journald），额外装 `fail2ban-firewalld` |
+> | Nginx 站点目录 | `/etc/nginx/sites-available/` + `sites-enabled/` 软链 | 只有 `/etc/nginx/conf.d/*.conf`，没有 sites-* 目录 |
+> | Nginx 默认站点 | `sites-enabled/default` 文件，删掉即可 | 默认 server 块直接写在 `nginx.conf` 里，要整体重写 `nginx.conf` |
+> | Nginx 全局加固 | `sed` 改 `ssl_protocols` / `server_tokens` | 原始 `nginx.conf` 里根本没有这两行，`sed` 会静默不生效，重写整份 `nginx.conf` |
+> | 证书目录 | `/root/cert/` | 建议 `/etc/nginx/cert/`（SELinux Enforcing 时 nginx 读不了 `/root` 下的 `admin_home_t` 文件） |
+> | SELinux | 无 | 可能 Enforcing：`setsebool -P httpd_can_network_connect 1` 才允许 nginx 反代到 127.0.0.1:10000 |
+> | 系统更新 | `apt update && apt upgrade` | `dnf upgrade` |
+>
+> 步骤 3/4/5/10/11/12/13/15 完全一致，不用改。
 
 > **已有服务排查（实战踩过坑）**：这一步顺带把整机当前监听的所有端口和正在跑的容器都摸一遍，为步骤 8 的防火墙配置做准备：
 > ```bash
@@ -62,7 +90,18 @@ ss -tlnp | grep -E ':80 |:443 '  # 检查端口占用
 apt update && apt install -y nginx ufw fail2ban curl wget openssl sqlite3 socat cron python3-bcrypt
 ```
 
-> `python3-bcrypt` 用于后续生成面板密码哈希。如果包不存在，后续会 fallback 到 `pip3 install bcrypt --break-system-packages`（较新的 Debian/Ubuntu 默认锁了系统 Python 环境，直接 `pip3 install` 可能报 `externally-managed-environment` 错误，需要加这个 flag）。
+> `python3-bcrypt` 用于后续生成面板密码哈希。如果包不存在，后续会 fallback 到 `pip3 install bcrypt --break-system-packages`（较新的 Debian/Ubuntu 默认锁了系统 Python 环境，直接 `pip3 install` 可能报 `externally-managed-environment` 错误，需要加这个 flag）。3x-ui 3.7+ 可以用 `x-ui setting` 命令行直接改密码，不再需要 bcrypt（见步骤 11）。
+
+**RHEL 系（AlmaLinux/Rocky/CentOS Stream）替代命令**：
+
+```bash
+dnf install -y epel-release
+dnf install -y nginx firewalld fail2ban fail2ban-firewalld curl wget openssl sqlite socat cronie tar python3 python3-pip
+pip3 install bcrypt
+systemctl enable --now crond firewalld
+```
+
+> `cronie`/`crond` 必须在步骤 4 装 acme.sh 之前就启用，否则 acme.sh 装不上自动续期任务。`fail2ban-firewalld` 提供 firewalld 联动的 banaction。
 
 ## 步骤 2.5：加 Swap（内存安全垫，别省略）
 
@@ -137,18 +176,27 @@ export CF_Key CF_Email
 申请并安装证书：
 
 ```bash
+~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
 ~/.acme.sh/acme.sh --issue -d "$ROOT_DOMAIN" -d "*.$ROOT_DOMAIN" --dns dns_cf --keylength ec-256
 
-mkdir -p /root/cert
-~/.acme.sh/acme.sh --install-cert -d "$ROOT_DOMAIN" \
-  --cert-file "/root/cert/$ROOT_DOMAIN.cer" \
-  --key-file "/root/cert/$ROOT_DOMAIN.key" \
-  --fullchain-file /root/cert/fullchain.cer \
-  --ca-file /root/cert/ca.cer \
-  --reloadcmd "systemctl reload nginx"
+mkdir -p "$CERT_DIR"
+~/.acme.sh/acme.sh --install-cert -d "$ROOT_DOMAIN" --ecc \
+  --cert-file "$CERT_DIR/$ROOT_DOMAIN.cer" \
+  --key-file "$CERT_DIR/$ROOT_DOMAIN.key" \
+  --fullchain-file "$CERT_DIR/fullchain.cer" \
+  --ca-file "$CERT_DIR/ca.cer" \
+  --reloadcmd "systemctl reload nginx || true"
 
-chmod 600 /root/cert/*.key
+chmod 600 "$CERT_DIR"/*.key
 ```
+
+> `--set-default-ca --server letsencrypt`：acme.sh 默认 CA 是 ZeroSSL，偶尔注册/签发慢，Let's Encrypt 更稳。`--reloadcmd` 加 `|| true`，因为这一步 nginx 还没启动，reload 会报 "not active"，不影响证书安装。`CERT_DIR` 在步骤 0 定义，Debian 用 `/root/cert`，RHEL 系用 `/etc/nginx/cert`（SELinux Enforcing 时 nginx 进程读不了 `/root` 下的文件；Disabled 时放哪都行，但统一用 `/etc/nginx/cert` 省事）。
+>
+> 新格式的 Cloudflare Global API Key（`cfk_` 开头，2026 年起出现）和旧的 37 位 hex key 一样走 `CF_Key`+`CF_Email`，acme.sh 的 `dns_cf` 直接可用，不用换成 Token 方式。拿到凭据先本地验一下比在服务器上跑失败再回头快：
+> ```bash
+> curl -s "https://api.cloudflare.com/client/v4/zones?name=$ROOT_DOMAIN" -H "X-Auth-Email: $CF_Email" -H "X-Auth-Key: $CF_Key" | head -c 300
+> # 期望看到 "status":"active" 和 zone id
+> ```
 
 > 如果证书申请失败并报 `DNS identifier is invalid`，回到步骤 0 的"域名核实"部分——大概率是 `ROOT_DOMAIN` 本身是公共后缀（PSL），不是真正可签证书的域名。
 >
@@ -219,9 +267,39 @@ sed -i 's/ssl_protocols TLSv1 TLSv1.1 TLSv1.2 TLSv1.3;/ssl_protocols TLSv1.2 TLS
 sed -i 's/# server_tokens off;/server_tokens off;/' /etc/nginx/nginx.conf
 ```
 
+**RHEL 系**：自带的 `nginx.conf` 里既没有 `ssl_protocols` 也没有 `server_tokens` 行（上面两条 `sed` 会静默不生效），而且默认 `server { listen 80 default_server; }` 块直接写在 `nginx.conf` 里，会抢掉我们站点的 80 端口。直接整体重写：
+
+```bash
+cp -n /etc/nginx/nginx.conf /etc/nginx/nginx.conf.orig
+cat > /etc/nginx/nginx.conf <<'NGX'
+user nginx;
+worker_processes auto;
+error_log /var/log/nginx/error.log notice;
+pid /run/nginx.pid;
+include /usr/share/nginx/modules/*.conf;
+events { worker_connections 1024; }
+http {
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent"';
+    access_log /var/log/nginx/access.log main;
+    sendfile on;
+    tcp_nopush on;
+    keepalive_timeout 65;
+    types_hash_max_size 4096;
+    server_tokens off;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    include /etc/nginx/conf.d/*.conf;
+}
+NGX
+# SELinux Enforcing 时还要放行 nginx 反代到本机端口
+[ "$(getenforce 2>/dev/null)" = "Enforcing" ] && setsebool -P httpd_can_network_connect 1
+```
+
 ## 步骤 7：配置 Nginx 站点
 
 ```bash
+# Debian/Ubuntu 写到 sites-available；RHEL 系把路径换成 /etc/nginx/conf.d/$DOMAIN.conf（见下方）
 cat > "/etc/nginx/sites-available/$DOMAIN" << NGINXEOF
 server {
     listen 80;
@@ -235,8 +313,8 @@ server {
     listen [::]:443 ssl http2;
     server_name $DOMAIN;
 
-    ssl_certificate /root/cert/fullchain.cer;
-    ssl_certificate_key /root/cert/$ROOT_DOMAIN.key;
+    ssl_certificate $CERT_DIR/fullchain.cer;
+    ssl_certificate_key $CERT_DIR/$ROOT_DOMAIN.key;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305';
     ssl_prefer_server_ciphers on;
@@ -276,7 +354,7 @@ server {
 NGINXEOF
 ```
 
-> heredoc 不带引号，`$DOMAIN`、`$ROOT_DOMAIN`、`$WS_PATH` 会被 bash 展开为实际值。Nginx 变量（`$server_name`、`$host` 等）用 `\$` 转义以保留。
+> heredoc 不带引号，`$DOMAIN`、`$ROOT_DOMAIN`、`$WS_PATH`、`$CERT_DIR` 会被 bash 展开为实际值。Nginx 变量（`$server_name`、`$host` 等）用 `\$` 转义以保留。
 
 启用配置：
 
@@ -284,6 +362,14 @@ NGINXEOF
 ln -sf "/etc/nginx/sites-available/$DOMAIN" /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl reload nginx
+```
+
+**RHEL 系**：没有 `sites-available`/`sites-enabled`，把上面同样的 server 配置写到 `/etc/nginx/conf.d/$DOMAIN.conf`（heredoc 内容不变，只改 `cat >` 的目标路径），两个 `listen` 行建议加 `default_server`（`listen 80 default_server;` / `listen 443 ssl http2 default_server;`），因为步骤 6 重写后的 `nginx.conf` 里已经没有默认站点了。然后：
+
+```bash
+nginx -t && systemctl enable --now nginx && systemctl restart nginx
+# 本地验一下伪装站（不经过 CF），期望 200
+curl -sk --resolve "$DOMAIN:443:127.0.0.1" -o /dev/null -w '%{http_code}\n' "https://$DOMAIN/"
 ```
 
 ## 步骤 8：配置防火墙
@@ -304,6 +390,19 @@ ufw deny "$XUI_PORT/tcp"
 # ufw allow <访问密钥端口>/udp comment "outline-access-key"
 
 echo "y" | ufw enable
+```
+
+**RHEL 系（firewalld 替代 ufw）**：firewalld 默认策略就是"未放行的入站全部拒绝"，所以不需要 `deny` 面板端口，也不需要单独 deny 任何东西，只做放行。默认 public 区域通常预放行了 `cockpit` 和 `dhcpv6-client`，顺手去掉：
+
+```bash
+firewall-cmd --permanent --add-service=ssh      # SSH 端口不是 22 时改用 --add-port=$SSH_PORT/tcp
+firewall-cmd --permanent --add-service=http
+firewall-cmd --permanent --add-service=https
+firewall-cmd --permanent --remove-service=cockpit 2>/dev/null
+firewall-cmd --permanent --remove-service=dhcpv6-client 2>/dev/null
+# 已有服务的端口在这里补：firewall-cmd --permanent --add-port=<端口>/tcp
+firewall-cmd --reload
+firewall-cmd --list-all | grep -E 'services|ports'   # 期望 services: http https ssh
 ```
 
 > 云平台（Azure/AWS/GCP 等）通常还有一层独立于 UFW 之外的网络级防火墙（Azure 叫"网络安全组 NSG"，AWS 叫"Security Group"，GCP 叫"防火墙规则"）。**只放行 UFW 不够**，必须同时确认云平台控制台里也放行了 22/80/443（以及任何已有服务的端口）。这一层无法通过 SSH 命令配置，必须提醒用户去对应云平台的网页控制台操作。判断方法：服务器上 `curl localhost` 一切正常，但从外网 `curl`/`telnet` 到服务器 IP 却连不上，基本可以确定是这一层的问题。
@@ -329,6 +428,28 @@ JAILEOF
 systemctl enable fail2ban && systemctl restart fail2ban
 ```
 
+**RHEL 系**：没有 `/var/log/auth.log`（sshd 日志在 journald），也没有 ufw 这个 banaction。`jail.local` 改成：
+
+```bash
+cat > /etc/fail2ban/jail.local << JAILEOF
+[DEFAULT]
+bantime = 3600
+findtime = 600
+maxretry = 5
+banaction = firewallcmd-rich-rules
+backend = systemd
+
+[sshd]
+enabled = true
+port = $SSH_PORT
+maxretry = 3
+bantime = 7200
+JAILEOF
+
+systemctl enable fail2ban && systemctl restart fail2ban
+sleep 2 && fail2ban-client status sshd | head -4   # 能看到 Filter/Actions 就是起来了
+```
+
 ## 步骤 10：安装 3X-UI
 
 ```bash
@@ -341,6 +462,26 @@ bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.
 >
 > 使用 **MHSanaei/3x-ui**，不要用已停维的 vaxilu/x-ui。
 
+**推荐做法（3x-ui 3.7+ 安装器支持正式的非交互模式，实战验证 2026-09）**：安装脚本里有 `prompt_or_default` 函数，`NONINTERACTIVE=1` 时所有 `read -rp` 都改从环境变量取值，不再有"喂 stdin 被忽略"的不确定性。先把脚本下载下来看一眼有哪些 `XUI_*` 变量（`grep -oE 'XUI_[A-Z_]+' install.sh | sort -u`），然后直接把我们自己生成的凭据喂进去，步骤 11 就只剩收尾工作：
+
+```bash
+export NONINTERACTIVE=1 XUI_NONINTERACTIVE=1
+export XUI_USERNAME="$XUI_USER"
+export XUI_PASSWORD="$XUI_PASS"
+export XUI_PANEL_PORT="$XUI_PORT"
+export XUI_WEB_BASE_PATH="panel"      # 安装器要求 ≥4 字符，步骤 11 再改回 /
+export XUI_SSL_MODE=none              # 面板走 SSH 隧道，不要安装器自己去申请证书
+export XUI_DB_TYPE=sqlite
+export XUI_SERVER_IP="$(curl -s --max-time 10 ifconfig.me)"
+
+curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh -o /tmp/xui-install.sh
+bash /tmp/xui-install.sh > /tmp/xui-install.log 2>&1 < /dev/null
+echo "rc=$?"
+grep -aE 'Installation Complete|Username:|Port:|WebBasePath|error|failed' /tmp/xui-install.log | sed 's/\x1b\[[0-9;]*m//g'
+```
+
+> 非交互模式下安装器会把面板绑到 `0.0.0.0`（注释里写明"cloud images must stay reachable"），步骤 11 用 `x-ui setting -listenIP 127.0.0.1` 改回来。`< /dev/null` 是为了万一某个版本还有漏网的 `read`，让它立刻拿到 EOF 走默认值而不是挂住。
+
 等待安装完成，确认数据库文件存在，并顺手记录一下装的是什么版本（后面步骤 12/13 要根据版本判断 schema）：
 
 ```bash
@@ -349,6 +490,30 @@ x-ui --version 2>&1 || (command -v x-ui >/dev/null && x-ui | head -5)
 ```
 
 ## 步骤 11：配置 3X-UI 面板
+
+**推荐做法（3x-ui 3.7+，实战验证）**：面板自带 `x-ui setting` 命令行，能一次改完凭据、端口、base path、监听地址，自己处理 bcrypt 和表结构，比手写 sqlite 稳：
+
+```bash
+systemctl stop x-ui
+/usr/local/x-ui/x-ui setting -username "$XUI_USER" -password "$XUI_PASS" -port "$XUI_PORT" -webBasePath "/" -listenIP "127.0.0.1"
+# 期望三行：Username and password updated successfully / Base URI path set successfully / listen 127.0.0.1 set successfully
+
+# 订阅端口和 secret 没有命令行开关，还是走 sqlite。用"先查有没有再决定 INSERT/UPDATE"的写法，避开下面说的 INSERT OR REPLACE 重复行问题
+set_setting() {
+  local n=$(sqlite3 /etc/x-ui/x-ui.db "SELECT COUNT(*) FROM settings WHERE key='$1';")
+  if [ "$n" = "0" ]; then sqlite3 /etc/x-ui/x-ui.db "INSERT INTO settings (key, value) VALUES ('$1', '$2');"
+  else sqlite3 /etc/x-ui/x-ui.db "UPDATE settings SET value='$2' WHERE key='$1';"; fi
+}
+set_setting subEnable false
+set_setting subListen 127.0.0.1
+set_setting secret "$(openssl rand -hex 16)"
+
+# 把 API token 存下来，步骤 13 要用（3.7+ 安装时自动生成）
+/usr/local/x-ui/x-ui setting -getApiToken 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -Eo 'apiToken: .+' | awk '{print $2}' > /root/.secrets/xui_api_token.txt
+chmod 600 /root/.secrets/xui_api_token.txt
+```
+
+装的是老版本、没有 `x-ui setting -listenIP` 这类参数时，退回下面的 sqlite 方式：
 
 ```bash
 systemctl stop x-ui
@@ -432,7 +597,44 @@ sqlite3 /etc/x-ui/x-ui.db "INSERT OR REPLACE INTO settings (key, value) VALUES (
 > sqlite3 /etc/x-ui/x-ui.db ".schema inbounds" | grep -q "all_time" && echo "OLD_SCHEMA" || echo "NEW_SCHEMA"
 > ```
 
-### 先插入 inbound（两种 schema 通用，字段按实际 schema 增减）
+### 路线 A（新版 schema 首选，3x-ui 3.7.0 实战验证）：走面板 API，不碰 sqlite
+
+新版把 client 拆表之后，手写 sqlite 要同时对 `inbounds`/`clients`/`client_inbounds` 三张表的字段和默认值负责，版本一变就得重查。面板自己的 HTTP API 会替你把这些都写对，而且 3.7+ 安装时就生成了一个 API token，不用登录拿 cookie：
+
+```bash
+TOKEN=$(cat /root/.secrets/xui_api_token.txt)
+B="http://127.0.0.1:$XUI_PORT"    # webBasePath 是 / 时；如果步骤 11 保留了 base path，要拼进去
+systemctl start x-ui && sleep 3
+
+# 先确认 token 可用
+curl -s "$B/panel/api/inbounds/list" -H "Authorization: Bearer $TOKEN"   # 期望 {"success":true,...}
+
+# 三段 JSON 作为字符串字段传给 API（API 要求 settings/streamSettings/sniffing 是 JSON 字符串，不是嵌套对象）
+# 注意：client 里不要带 "tgId":""，3.7 把 tgId 改成了 int64，传空字符串会报 cannot unmarshal string ... tgId
+SETTINGS="{\"clients\":[{\"id\":\"$UUID\",\"flow\":\"\",\"email\":\"default-user\",\"limitIp\":0,\"totalGB\":0,\"expiryTime\":0,\"enable\":true,\"subId\":\"\",\"reset\":0}],\"decryption\":\"none\",\"fallbacks\":[]}"
+STREAM="{\"network\":\"xhttp\",\"security\":\"none\",\"xhttpSettings\":{\"path\":\"/$WS_PATH\",\"host\":\"$DOMAIN\",\"mode\":\"auto\"}}"
+SNIFFING="{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"],\"metadataOnly\":false,\"routeOnly\":true}"
+python3 - "$SETTINGS" "$STREAM" "$SNIFFING" > /tmp/inbound.json <<'PY'
+import json, sys
+print(json.dumps({"up":0,"down":0,"total":0,"remark":"VLESS-XHTTP-TLS-CF","enable":True,"expiryTime":0,
+  "listen":"127.0.0.1","port":10000,"protocol":"vless",
+  "settings":sys.argv[1],"streamSettings":sys.argv[2],"sniffing":sys.argv[3]}))
+PY
+curl -s -X POST "$B/panel/api/inbounds/add" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" --data @/tmp/inbound.json
+# 期望 {"success":true,"msg":"Inbound has been successfully created.", ...}
+
+# API 返回成功后 config.json 不一定马上重新生成，必须重启一次
+systemctl restart x-ui && sleep 4
+```
+
+> 几个实战里踩到的细节：
+> - **不要用 `curl -X POST /login` 拿 cookie**：3.7 的登录接口有 CSRF 保护，非浏览器请求即使带上 `Origin`/`Referer` 也是 403 空响应。Bearer token 走 `/panel/api/*` 路由没有这个限制。
+> - **API 创建的入站 tag 是 `in-10000-tcp`**，不是本文档旧步骤里的 `inbound-10000`。后面任何 `WHERE tag='inbound-10000'` 的查询都要改成 `WHERE port=10000`。
+> - 直接往 `inbounds` 表 INSERT 一行（哪怕字段全对、`enable=1`）在 3.7.0 上会被 config 生成逻辑**静默忽略**，`config.json` 的 `inbounds` 是空数组、10000 端口不监听、日志没有任何报错——比 CHANGELOG 里记的"clients 为 null"更彻底。所以新版 schema 优先走 API；下面的路线 B 只在 API 也用不了时才用。
+
+### 路线 B（旧版 schema，或 API 不可用时的兜底）：直接写 sqlite
+
+先插入 inbound（两种 schema 通用，字段按实际 schema 增减）：
 
 ```bash
 STREAM="{\"network\":\"xhttp\",\"security\":\"none\",\"xhttpSettings\":{\"path\":\"/$WS_PATH\",\"host\":\"$DOMAIN\",\"mode\":\"auto\"}}"
@@ -458,19 +660,21 @@ CLIENT_ID=$(sqlite3 /etc/x-ui/x-ui.db "SELECT id FROM clients WHERE uuid='$UUID'
 sqlite3 /etc/x-ui/x-ui.db "INSERT INTO client_inbounds (client_id, inbound_id, created_at) VALUES ($CLIENT_ID, $INBOUND_ID, $NOW);"
 ```
 
-### 启动并验证 clients 真的生效了（不要跳过这步）
+### 启动并验证 clients 真的生效了（不要跳过这步，A/B 两条路线都要做）
 
 ```bash
-systemctl start x-ui
+systemctl restart x-ui
 sleep 3
 
-# 关键验证：不管走的哪种 schema，最终都要在运行配置里看到真实的 clients，而不是 null
+# 关键验证：不管走的哪种路线，最终都要在运行配置里看到这个 inbound 且 clients 有真实内容，而不是 null / 空数组
 python3 -c "
 import json
 cfg = json.load(open('/usr/local/x-ui/bin/config.json'))
-for ib in cfg.get('inbounds', []):
-    print(ib.get('tag'), json.dumps(ib.get('settings')))
+print('inbound count:', len(cfg.get('inbounds') or []))
+for ib in cfg.get('inbounds') or []:
+    print(ib.get('tag'), ib.get('listen'), ib.get('port'), json.dumps(ib.get('settings')))
 "
+ss -tlnp | grep '127.0.0.1:10000'   # 必须有
 ```
 
 看到类似 `{"clients": [{"email": "default-user", "id": "你的UUID"}], ...}` 才算真正成功。**如果看到 `"clients": null`，说明客户端数据没有正确落地到当前版本实际读取的位置**——回头确认一下：
@@ -506,10 +710,19 @@ for ib in cfg.get('inbounds', []):
 "
 
 # 防火墙状态（确认已有服务端口——如果有——也在放行列表里）
-ufw status
+ufw status                              # Debian/Ubuntu
+firewall-cmd --list-all 2>/dev/null     # RHEL 系
 
-# SSL 证书有效期
-openssl x509 -in /root/cert/fullchain.cer -noout -enddate
+# 公网监听面：只应该有 22/80/443；看到 2096（订阅端口）或 54321 绑在 0.0.0.0 就是步骤 11 没生效
+ss -tlnp | awk 'NR>1{print $4}' | sort -u
+
+# SSL 证书有效期 + 自动续期任务
+openssl x509 -in "$CERT_DIR/fullchain.cer" -noout -enddate
+crontab -l | grep -c acme.sh            # 期望 1
+
+# XHTTP 链路（本机 → Nginx → Xray）：期望 404（Xray 在响应但握手不合法），502 说明 Xray 没监听
+WS_PATH=$(cat /root/.secrets/ws_path.txt)
+curl -sk --resolve "$DOMAIN:443:127.0.0.1" -o /dev/null -w '%{http_code}\n' -X POST "https://$DOMAIN/$WS_PATH"
 ```
 
 如果任一项不通过，参考 `troubleshooting.md` 对应的诊断和修复方法。
@@ -552,10 +765,15 @@ curl -s -X PATCH "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/settings/w
   --data '{"value":"on"}'
 ```
 
-配完等 10-20 秒 DNS 生效，然后验证：
+> 先 `GET .../dns_records` 看一眼有没有已存在的同名记录再 POST，避免建出重复 A 记录。`ssl`/`min_tls_version`/`websockets` 三个设置也可以先 GET 一下，只 PATCH 不对的项。
+
+配完等 10-20 秒 DNS 生效，然后验证（这两条在本机跑，不是在服务器上）：
 
 ```bash
-curl -s -o /dev/null -w "HTTPS via CF: %{http_code}\n" --max-time 15 "https://$DOMAIN/"
+# 伪装站经 CF：期望 200，且响应头有 server: cloudflare / cf-ray
+curl -sI --max-time 20 "https://$DOMAIN/" | grep -iE '^(HTTP|server|cf-ray)'
+# XHTTP 路径经 CF：期望 404（Xray 在响应）；5xx = Nginx/Xray 那一层断了，521/522 = CF 连不上源站
+curl -s -o /dev/null -w "XHTTP via CF: %{http_code}\n" --max-time 20 -X POST "https://$DOMAIN/$WS_PATH"
 ```
 
 如果这里超时或连不上，且服务器本地 `curl localhost` 正常，优先怀疑云平台安全组/NSG 没放行 80/443（见步骤 8 的说明）。
@@ -612,7 +830,7 @@ $VLESS_LINK
   WARNING: Panel-exported links have WRONG port, TLS, and transport settings!
 
 ## Security
-  - UFW: only $SSH_PORT/80/443 (+ any pre-existing service ports) open
+  - Firewall (ufw / firewalld): only $SSH_PORT/80/443 (+ any pre-existing service ports) open
   - X-UI: localhost only (127.0.0.1:$XUI_PORT)
   - Xray: localhost only (127.0.0.1:10000)
   - Fail2Ban: SSH $SSH_PORT, 3 attempts → 2hr ban
@@ -621,11 +839,12 @@ $VLESS_LINK
 
 ## Key Files
   - Secrets:     /root/.secrets/
-  - Nginx Site:  /etc/nginx/sites-available/$DOMAIN
+  - Nginx Site:  /etc/nginx/sites-available/$DOMAIN  (RHEL: /etc/nginx/conf.d/$DOMAIN.conf)
   - Fail2Ban:    /etc/fail2ban/jail.local
   - X-UI DB:     /etc/x-ui/x-ui.db
+  - X-UI API:    /root/.secrets/xui_api_token.txt (3.7+, Authorization: Bearer ...)
   - Xray Config: /usr/local/x-ui/bin/config.json (auto-generated, don't edit)
-  - Certs:       /root/cert/
+  - Certs:       $CERT_DIR/
 
 ## Optional: 直连主力 + CF 兜底（进阶，跑通基础后再看）
   references/cf-dns-strategy.md
