@@ -726,6 +726,9 @@ firewall-cmd --list-all 2>/dev/null     # RHEL 系
 # 公网监听面：只应该有 22/80/443；看到 2096（订阅端口）或 54321 绑在 0.0.0.0 就是步骤 11 没生效
 ss -tlnp | awk 'NR>1{print $4}' | sort -u
 
+# Xray API 入站（步骤 12 模板里的 tag: api）必须在 127.0.0.1:62789 监听，否则面板无法热加载客户端
+ss -tlnp | grep -E '127.0.0.1:62789 ' || echo "MISSING: xray api inbound (check xrayTemplateConfig inbounds)"
+
 # SSL 证书有效期 + 自动续期任务
 openssl x509 -in "$CERT_DIR/fullchain.cer" -noout -enddate
 crontab -l | grep -c acme.sh            # 期望 1
