@@ -77,7 +77,17 @@ systemctl restart x-ui
 echo "$NEW_UUID"
 ```
 
-> `addClient` 这个接口是 3x-ui 官方 API 列表里的，字段格式和 `inbounds/add` 一致；部署实战里验证过的是 `inbounds/add`，`addClient` 加完务必按下一节的方法确认 `config.json` 里真的多了这个 UUID。
+> `addClient` 是老接口。3.7+ 更推荐新接口 `POST /panel/api/clients/add`（2026-09-15 实战验证），请求体是普通 JSON 而不是字符串嵌套：
+>
+> ```bash
+> curl -s -X POST "http://127.0.0.1:$XUI_PORT/panel/api/clients/add" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+>   --data "{\"client\":{\"id\":\"$NEW_UUID\",\"email\":\"user2\",\"enable\":true,\"limitIp\":0,\"totalGB\":0,\"expiryTime\":0,\"flow\":\"\",\"subId\":\"\",\"reset\":0},\"inboundIds\":[$INBOUND_ID]}"
+> # 回读确认 UUID 一致（UUID 必须放在 client.id，放错字段面板会静默自己生成一个）
+> curl -s "http://127.0.0.1:$XUI_PORT/panel/api/clients/get/user2" -H "Authorization: Bearer $TOKEN"
+> # 删除：POST /panel/api/clients/del/<email>
+> ```
+>
+> 模板里配了 api 入站的话（见 `manual-deploy.md` 步骤 12）这一步是热加载，秒级生效、不重启 Xray、**`config.json` 不会更新**——验证看 `clients/get` 的回读或直接用新 UUID 连一次，不要再依赖 `config.json`。没配 api 入站的话要等约 30 秒巡检重启 Xray 才生效。
 
 ### 通过面板加完客户端后，务必验证真的生效了
 

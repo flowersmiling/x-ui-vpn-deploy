@@ -566,6 +566,9 @@ echo "webBasePath: $WEBBASEPATH"
 sqlite3 /etc/x-ui/x-ui.db "INSERT OR REPLACE INTO settings (key, value) VALUES ('xrayTemplateConfig', '{
   \"log\": {\"access\": \"none\", \"dnsLog\": false, \"loglevel\": \"warning\"},
   \"dns\": {\"servers\": [\"8.8.8.8\", \"1.1.1.1\"]},
+  \"inbounds\": [
+    {\"tag\": \"api\", \"listen\": \"127.0.0.1\", \"port\": 62789, \"protocol\": \"tunnel\", \"settings\": {\"rewriteAddress\": \"127.0.0.1\"}}
+  ],
   \"routing\": {
     \"domainStrategy\": \"IPIfNonMatch\",
     \"rules\": [
@@ -578,10 +581,17 @@ sqlite3 /etc/x-ui/x-ui.db "INSERT OR REPLACE INTO settings (key, value) VALUES (
     {\"tag\": \"blocked\", \"protocol\": \"blackhole\", \"settings\": {}}
   ],
   \"policy\": {\"levels\": {\"0\": {\"statsUserDownlink\": true, \"statsUserUplink\": true}}, \"system\": {\"statsInboundDownlink\": true, \"statsInboundUplink\": true}},
-  \"api\": {\"tag\": \"api\", \"services\": [\"HandlerService\", \"LoggerService\", \"StatsService\"]},
+  \"api\": {\"tag\": \"api\", \"services\": [\"HandlerService\", \"LoggerService\", \"StatsService\", \"RoutingService\"]},
+  \"metrics\": {\"tag\": \"metrics_out\", \"listen\": \"127.0.0.1:11111\"},
   \"stats\": {}
 }');"
 ```
+
+> **`inbounds` 里的 api 入站不能省（2026-09-15 实战补的坑）**：3x-ui 自带的默认模板里有这个 `tag: api` 的本地入站，面板靠它找到 Xray gRPC API 端口来做客户端热加载。本 skill 早期模板只写了 `api` 块没写这个入站，后果是：面板日志每几秒一行 `Failed to initialize Xray API: invalid Xray API port: 0`；每次加/删客户端都走不了热加载（日志 `Error in adding client on local : local xray is not running`），退化成由一个约 30 秒一次的巡检任务整体重启 Xray——客户端 30 秒内不可用、已连接用户被断一次，而且期间用程序去查会误判成"加客户端不生效 / 入站损坏"。补上之后加客户端秒级生效、不重启 Xray（日志变成 `Client added on local`）。
+> - 协议名：Xray 25.x 起 `dokodemo-door` 改名 `tunnel`，`address` 改 `rewriteAddress`，跟随面板自带模板（`internal/web/service/config.json`）写即可；老 Xray 用 `dokodemo-door` + `settings.address`。
+> - 62789 和 11111 只监听 127.0.0.1，不需要开防火墙。
+> - **热加载后 `config.json` 不会更新**（它只在 Xray 重启时重新生成），所以判断客户端是否生效不要再看 `config.json`，用 `GET /panel/api/clients/get/<email>` 回读，或直接用该 UUID 连一次。
+> - 已经部署过的机器补救：用 python 读出 `xrayTemplateConfig`，加上 `inbounds`/`metrics`、把 `api.services` 补上 `RoutingService`，写回后 `systemctl restart x-ui`，`ss -tlnp | grep -E ':62789|:11111'` 能看到即可。
 
 > `log.access` 平时保持 `"none"`。排障时可以临时改成一个文件路径开详细日志（见 `troubleshooting.md`），但**排障结束后一定要记得改回 `"none"` 并 `systemctl restart x-ui`**——长期开着不会立刻出事（体量不大的话），但没必要一直占用额外的磁盘 I/O，也曾经在一次内存本就紧张的机器上被怀疑是雪上加霜的因素之一。
 

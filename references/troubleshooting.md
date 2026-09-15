@@ -54,6 +54,8 @@
 | 面板 `/login` 对 curl 返回 403 空响应 | 3.7 登录接口有 CSRF 保护 | 别拿 cookie，用 `x-ui setting -getApiToken` 的 Bearer token 调 `/panel/api/*` |
 | API 报 `cannot unmarshal string into ... tgId of type int64` | client JSON 里带了 `"tgId":""` | 去掉 tgId 字段（3.7 改成 int） |
 | `ufw: command not found` / `apt: command not found` | `cat /etc/os-release` 是 AlmaLinux/Rocky/CentOS | 走 RHEL 分支，见下方"RHEL 系服务器" |
+| 加客户端后要等 30 秒才能用；面板日志刷 `invalid Xray API port: 0` / `Error in adding client on local`；程序判定"入站损坏、加客户端不写入" | `ss -tlnp \| grep 62789` 没有；`config.json` 的 inbounds 里没有 `tag: api` | 模板缺 api 入站，见下方"客户端热加载不生效" |
+| 客户端用不存在的 UUID，报 `invalid request user id`，而程序坚称已添加 | `sqlite3 x-ui.db "SELECT email, uuid FROM clients;"` 没这条 | 程序的请求没到面板，或 UUID 没放在 `client.id` 字段，见下方"程序加的客户端不存在" |
 
 ### 详细诊断命令
 
@@ -182,6 +184,62 @@ nginx -T 2>/dev/null | grep -E 'ssl_protocols|server_tokens'
 ```
 
 实战（AlmaLinux 9.7，SELinux Disabled）按这套替换一次跑通，3x-ui 安装脚本本身就支持 `almalinux | rocky | rhel`。
+
+### 2.6 客户端热加载不生效：加客户端要等 30 秒，程序误判"入站损坏"（2026-09-15 实战）
+
+**症状**：通过面板或 API 加客户端，`clients` 表、`client_inbounds`、`inbounds.settings` 都立刻有了，但 Xray 运行配置里没有、用新 UUID 连报 `invalid request user id`，过大约 30 秒又自己好了。面板日志（`/var/log/x-ui/3xui.log`）每几秒一行 `Failed to initialize Xray API: invalid Xray API port: 0`，每次加/删客户端一行 `Error in adding client on local : local xray is not running`，随后 `restart Xray, force: false`。外部检查程序如果加完立刻查、查完就删，会得出"加客户端不写入 / 入站损坏、需要重建"的错误结论——**不要重建入站**，重建会换 ID、清掉所有客户端、断开在线用户。
+
+**根因**：`xrayTemplateConfig` 里没有 `tag: api` 的本地入站，面板找不到 Xray gRPC API 端口，热加载失败，退化成由约 30 秒一次的巡检任务整体重启 Xray。
+
+**确诊**：
+
+```bash
+ss -tlnp | grep -E ':62789 |:11111 '                      # 没有输出 = 没配
+python3 -c "import json; print([i['tag'] for i in json.load(open('/usr/local/x-ui/bin/config.json'))['inbounds']])"   # 没有 'api'
+```
+
+**修复**（补上 api 入站 + metrics，重启一次 x-ui，在线用户断几秒）：
+
+```bash
+cp /etc/x-ui/x-ui.db /root/x-ui.db.bak-$(date +%Y%m%d-%H%M%S)
+systemctl stop x-ui
+python3 - <<'PY'
+import sqlite3, json
+conn = sqlite3.connect('/etc/x-ui/x-ui.db'); c = conn.cursor()
+c.execute("SELECT value FROM settings WHERE key='xrayTemplateConfig' LIMIT 1")
+cfg = json.loads(c.fetchone()[0])
+cfg['inbounds'] = [{"listen":"127.0.0.1","port":62789,"protocol":"tunnel","settings":{"rewriteAddress":"127.0.0.1"},"tag":"api"}]
+cfg['api'] = {"services":["HandlerService","LoggerService","StatsService","RoutingService"],"tag":"api"}
+cfg['metrics'] = {"listen":"127.0.0.1:11111","tag":"metrics_out"}
+rules = cfg.setdefault('routing', {}).setdefault('rules', [])
+if not any(r.get('inboundTag') == ['api'] for r in rules):
+    rules.insert(0, {"type":"field","inboundTag":["api"],"outboundTag":"api"})
+c.execute("UPDATE settings SET value=? WHERE key='xrayTemplateConfig'", (json.dumps(cfg, indent=2),))
+conn.commit()
+PY
+systemctl start x-ui; sleep 6
+ss -tlnp | grep -E ':62789 |:11111 '     # 两个都在 127.0.0.1 上
+```
+
+**验证**：再加一个测试客户端，面板日志应变成 `Client added on local : <email>`，用它的 UUID 立刻能连。注意热加载后 `config.json` **不会**更新（只在 Xray 重启时重新生成），验证要用 `GET /panel/api/clients/get/<email>` 回读或真实连一次，不要再看 `config.json`。
+
+### 2.7 程序加的客户端在服务器上不存在：手机报 `invalid request user id`（2026-09-15 实战）
+
+**症状**：外部程序（调面板 API 自动开号）记录了一个 UUID 并发给用户，用户连接时 Xray 访问日志报 `rejected proxy/vless/encoding: invalid request user id: <uuid>`，`clients` 表里没有这个 UUID，也没有这个 email。
+
+**两种根因，按日志区分**：
+
+1. **请求根本没到面板**：面板日志里没有这次的 `logged in`（用户名密码方式）、没有 `Client added on local`、没有 WARNING。面板只监听 127.0.0.1，程序若经 SSH 隧道访问，隧道断了就 connection refused；程序没检查响应就当成功。
+2. **到了面板，但 UUID 放错字段，面板自己生成了一个**：日志有 `Client added on local`，`clients` 表里有这个 email 但 UUID 不同。3.7 的 `POST /panel/api/clients/add` 请求体是 `{"client": {"id": "<uuid>", "email": "...", ...}, "inboundIds": [<入站ID>]}`，UUID 必须在 `client.id`；为空时服务端 `fillProtocolDefaults` 会静默 `uuid.NewString()` 且照常返回成功。`inboundIds` 指向不存在的入站会报 `record not found`（部署中删过重建过入站时 ID 不是 1，用 `SELECT id FROM inbounds` 现查）。
+
+**确诊**：
+
+```bash
+sqlite3 /etc/x-ui/x-ui.db "SELECT id, email, uuid, datetime(created_at/1000,'unixepoch') FROM clients;"
+sed 's/\x1b\[[0-9;]*m//g' /var/log/x-ui/3xui.log | grep -v 'XRAY:' | grep -iE 'logged in|Client added|adding client|WARNING' | tail -20
+```
+
+**程序侧建议**：添加成功后立刻 `GET /panel/api/clients/get/<email>` 回读，`obj.client.uuid` 和自己生成的一致才写库；对 HTTP 非 200、响应非 JSON、`success != true` 一律按失败处理。
 
 ### 3. 根域名是 Public Suffix List 上的公共后缀 → 证书申请失败
 

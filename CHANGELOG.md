@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-15 — 补 Xray api 入站；两个运维排障案例
+
+- **`manual-deploy.md` 步骤 12（模板缺陷）**：`xrayTemplateConfig` 补上 3x-ui 默认模板里的 `tag: api` 本地入站（127.0.0.1:62789，Xray 25+ 协议名 `tunnel`）、`metrics` 块和 `api.services` 里的 `RoutingService`。之前的模板只有 `api` 块没有入站，面板找不到 Xray API 端口，加/删客户端无法热加载，退化成约 30 秒一次的巡检整体重启 Xray；外部程序据此误判"入站损坏、需重建"。补上后热加载秒级生效，日志从 `Error in adding client on local` 变为 `Client added on local`（实战验证：热加载的 UUID 不重启即可连通）。
+- `troubleshooting.md` 新增 2.6"客户端热加载不生效"（含已部署机器的补救脚本）和 2.7"程序加的客户端在服务器上不存在"（请求没到面板 vs UUID 没放在 `client.id` 两种根因，及 v2rayNG `connection test failed: EOF` 的真实案例——最终是手机用了一个从未成功创建的 UUID）。
+- `maintenance.md`：加客户端改为推荐 3.7+ 的 `POST /panel/api/clients/add`（普通 JSON，UUID 在 `client.id`），并说明热加载后 `config.json` 不再实时反映客户端。
+- `SKILL.md` 部署总结要求：明文列出 XHTTP path（不带前斜杠）、UUID、Inbound ID + tag、面板 basePath。
+
 ## 2026-09-09 — AlmaLinux 部署 + 3x-ui 3.7.0 适配
 
 基于第二次端到端部署实战（AlmaLinux 9.7 VPS + 3x-ui 3.7.0 + Windows 本机 plink 非交互执行 + Cloudflare API 自动配置）补充：
