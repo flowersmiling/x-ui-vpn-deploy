@@ -21,6 +21,43 @@
 
 ---
 
+## 第零步：在操作者本机用 Xray 核心做一次真实连接测试（2026-09-15 实战，最快的分水岭）
+
+用户说"连不上"时，与其来回猜客户端配置，不如先在自己（操作者）的机器上用官方 Xray 核心按同样参数连一次。**本机能通 = 节点没问题，剩下的全在用户的客户端或用户的网络；本机也不通 = 服务端问题**，一步把范围砍掉一半。Windows 示例：
+
+```bash
+# 下载 Xray 核心（Windows；Linux/macOS 换对应包名）
+curl -sL -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-windows-64.zip && mkdir -p xray && (cd xray && unzip -oq ../xray.zip)
+
+# 客户端配置：socks 入站 → vless+xhttp+tls 出站，参数和 vpn-config.txt 一致
+cat > client-test.json <<EOF
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [{"listen": "127.0.0.1", "port": 10899, "protocol": "socks", "settings": {"udp": false}}],
+  "outbounds": [{
+    "protocol": "vless",
+    "settings": {"vnext": [{"address": "$DOMAIN", "port": 443, "users": [{"id": "$UUID", "encryption": "none"}]}]},
+    "streamSettings": {
+      "network": "xhttp", "security": "tls",
+      "tlsSettings": {"serverName": "$DOMAIN", "fingerprint": "chrome"},
+      "xhttpSettings": {"path": "/$WS_PATH", "host": "$DOMAIN", "mode": "auto"}
+    }
+  }]
+}
+EOF
+./xray/xray.exe run -c client-test.json > xray-test.log 2>&1 &
+sleep 3
+curl -s --max-time 20 -x socks5h://127.0.0.1:10899 -o /dev/null -w "gstatic 204: %{http_code}\n" http://www.gstatic.com/generate_204
+curl -s --max-time 20 -x socks5h://127.0.0.1:10899 https://api.ipify.org; echo " <- 出口 IP，应是 VPS 的 IP"
+taskkill //F //IM xray.exe >/dev/null 2>&1   # Linux/macOS 用 kill
+```
+
+看到 204 且出口 IP 是 VPS，节点就是好的。顺手把 `mode` 换成 `packet-up` 和 `stream-one` 各跑一次可以证明：**经 Cloudflare 只有 auto / packet-up 能通，stream-up / stream-one 必失败**（CF 不支持流式上传），用户客户端里若选了 stream-* 就是 EOF 的来源之一。
+
+> 这个测试用的是真实凭据，会在面板流量统计里留下几十 KB、并占用该客户端的一个 IP 限制名额。生产节点上给用户的凭据尽量不要拿来测，用部署时的 default-user 或临时加一个测试客户端测完删掉。
+
+---
+
 ## 第一步：检查客户端链接
 
 按以下清单逐项排查：
@@ -56,6 +93,7 @@
 | `ufw: command not found` / `apt: command not found` | `cat /etc/os-release` 是 AlmaLinux/Rocky/CentOS | 走 RHEL 分支，见下方"RHEL 系服务器" |
 | 加客户端后要等 30 秒才能用；面板日志刷 `invalid Xray API port: 0` / `Error in adding client on local`；程序判定"入站损坏、加客户端不写入" | `ss -tlnp \| grep 62789` 没有；`config.json` 的 inbounds 里没有 `tag: api` | 模板缺 api 入站，见下方"客户端热加载不生效" |
 | 客户端用不存在的 UUID，报 `invalid request user id`，而程序坚称已添加 | `sqlite3 x-ui.db "SELECT email, uuid FROM clients;"` 没这条 | 程序的请求没到面板，或 UUID 没放在 `client.id` 字段，见下方"程序加的客户端不存在" |
+| **客户端测试报 `connection test failed: EOF`**（v2rayNG/v2rayN），伪装站能打开 | 先做下方"第零步：本机 Xray 真实连接测试" | EOF = 服务端主动关了连接，三个来源按序排除：① UUID 不在服务器上（临时开 Xray 访问日志看 `invalid request user id`）② XHTTP mode 设成了 stream-up/stream-one（经 CF 必失败，改 auto/packet-up）③ 客户端版本太旧不支持 xhttp |
 
 ### 详细诊断命令
 

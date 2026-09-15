@@ -6,6 +6,8 @@
 - `troubleshooting.md` 新增 2.6"客户端热加载不生效"（含已部署机器的补救脚本）和 2.7"程序加的客户端在服务器上不存在"（请求没到面板 vs UUID 没放在 `client.id` 两种根因，及 v2rayNG `connection test failed: EOF` 的真实案例——最终是手机用了一个从未成功创建的 UUID）。
 - `maintenance.md`：加客户端改为推荐 3.7+ 的 `POST /panel/api/clients/add`（普通 JSON，UUID 在 `client.id`），并说明热加载后 `config.json` 不再实时反映客户端。
 - `SKILL.md` 部署总结要求：明文列出 XHTTP path（不带前斜杠）、UUID、Inbound ID + tag、面板 basePath。
+- `troubleshooting.md` 新增"第零步"：在操作者本机用 Xray 核心按同样参数真实连一次，先分清节点问题还是客户端问题；快速诊断表新增 `connection test failed: EOF` 一行（三个来源：UUID 不存在、XHTTP stream-* 模式、客户端太旧）。
+- `SKILL.md` 客户端注意事项新增：XHTTP mode 只能 auto / packet-up，stream-up / stream-one 经 Cloudflare 必失败；运维场景开头新增"先确认 SSH 是否已改成密钥登录"。
 
 ## 2026-09-09 — AlmaLinux 部署 + 3x-ui 3.7.0 适配
 

@@ -198,6 +198,7 @@ vless://{UUID}@{DOMAIN}:443?encryption=none&security=tls&sni={DOMAIN}&type=xhttp
 2. **端口必须是 443**，不是内部端口 10000
 3. **必须有 `security=tls`、`sni` 和 `fp=chrome`**（fp 是 uTLS 指纹伪装，让 TLS 握手看起来像 Chrome 浏览器）
 4. **面板导出的链接不能直接用**——端口、TLS、传输类型参数都是错的，必须按上面的格式自己拼
+5. **XHTTP mode 只能用 `auto` 或 `packet-up`**（链接里不带 mode 参数时客户端默认 auto，不用加）。`stream-up` / `stream-one` 需要 CDN 支持流式上传，Cloudflare 不支持，经 CF 必定失败，症状是客户端报 `EOF`（2026-09-15 实战实测）。ALPN 留空，不要选 h3
 
 > 想加直连节点（更快、IP 被封时仍可切回 CF）？基础部署跑通后再读 `references/cf-dns-strategy.md`。
 
@@ -225,7 +226,7 @@ TUN 模式默认需要管理员权限手动启动，嫌麻烦可以用 Windows �
 
 ## 运维场景
 
-当用户的问题不是新部署，而是运维相关时，根据场景读取对应的参考文件：
+当用户的问题不是新部署，而是运维相关时，根据场景读取对应的参考文件。**动手前先确认 SSH 认证方式**：正式运营的节点通常已从密码改成密钥登录（`plink -pw` 会报 `No supported authentication methods available (server sent: publickey...)`），不要拿部署时的密码反复试，直接向用户要本地密钥路径（`ssh -i <key>` / `plink -i <key.ppk>`）。排"连不上"类问题优先做 `troubleshooting.md` 的"第零步"（操作者本机 Xray 真实连接测试），一步区分节点问题和客户端问题。
 
 | 场景 | 参考文件 |
 |------|----------|
